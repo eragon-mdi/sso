@@ -1,0 +1,79 @@
+services:
+  app-sso:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.sso-app
+    ports:
+      - "${SERVERS_GRPC_PORT:-8888}:8888"
+    env_file:
+      - .env
+    environment:
+      STORAGES_POSTGRES_HOST: db
+      STORAGES_REDIS_HOST: redis
+    volumes:
+      - ./secrets:/secrets:ro
+    networks:
+      - bridge_app
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:17.5
+    shm_size: 128mb
+    volumes:
+      - ./backup:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${STORAGES_POSTGRES_USER}
+      - POSTGRES_PASSWORD=${STORAGES_POSTGRES_PASS}
+      - POSTGRES_DB=${STORAGES_POSTGRES_NAME}
+      - POSTGRES_PORT=${STORAGES_POSTGRES_PORT}
+    ports:
+      - "${STORAGES_POSTGRES_PORT:-5432}:5432"
+    networks:
+      - bridge_app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STORAGES_POSTGRES_USER} -d ${STORAGES_POSTGRES_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrator:
+    image: migrate/migrate
+    volumes:
+      - ./migrations:/migrations
+    command:
+      [
+        "-path", "/migrations/sql",
+        "-database", "postgres://${STORAGES_POSTGRES_USER}:${STORAGES_POSTGRES_PASS}@db:5432/${STORAGES_POSTGRES_NAME}?sslmode=${STORAGES_POSTGRES_SSLM}",
+        "up"
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - bridge_app
+    env_file:
+      - .env
+    restart: "no"
+
+  redis:
+    image: redis:8.2.1-alpine
+    command: ["redis-server", "--requirepass", "${STORAGES_REDIS_PASS}"]
+    ports:
+      - "${STORAGES_REDIS_PORT:-6379}:6379"
+    networks:
+      - bridge_app
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${STORAGES_REDIS_PASS} -h 127.0.0.1 -p 6379 ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  bridge_app:
+    driver: bridge
